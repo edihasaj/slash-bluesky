@@ -1,0 +1,12 @@
+{
+  "name": "slash-bluesky",
+  "version": "0.1.0",
+  "description": "Edi's local Bluesky CLI — post, reply, and read on Bluesky from the command line.",
+  "type": "module",
+  "bin": {
+    "slash-bluesky": "cli.mjs",
+    "slb": "cli.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "license": "MIT"
+}
