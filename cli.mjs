@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // slash-bluesky — Edi's local Bluesky CLI. Post / reply / read via AT Protocol.
-// No dependencies. Uses an app password (Settings -> App passwords on bsky.app).
+// No dependencies. Uses browser session tokens first, then app-password fallback.
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 const PDS = process.env.BLUESKY_PDS || "https://bsky.social";
 
@@ -14,12 +18,15 @@ Usage:
   slash-bluesky check                    Verify credentials / login
 
 Auth (https://bsky.app/settings/app-passwords):
+  Browser session auto-detected from Chrome/Brave/Edge local storage when present.
   BLUESKY_IDENTIFIER=you.bsky.social   BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
   (or pass --identifier / --password)
 
 Options:
-  --file <path>   Read body text from a file
-  --json          Machine-readable JSON output
+  --file <path>             Read body text from a file
+  --browser-profile <path>  Browser profile dir or Local Storage/leveldb dir
+  --no-browser              Skip browser session lookup
+  --json                    Machine-readable JSON output
 
 Examples:
   slash-bluesky post "shipping slash-bluesky 🦋"
@@ -42,7 +49,10 @@ function cfg(flags) {
   return {
     identifier: flags.identifier || process.env.BLUESKY_IDENTIFIER || "",
     password: flags.password || process.env.BLUESKY_APP_PASSWORD || "",
-    jwt: "", did: "",
+    jwt: process.env.BLUESKY_ACCESS_JWT || "",
+    did: process.env.BLUESKY_DID || "",
+    handle: process.env.BLUESKY_HANDLE || "",
+    authSource: process.env.BLUESKY_ACCESS_JWT ? "env BLUESKY_ACCESS_JWT" : "",
   };
 }
 
@@ -61,9 +71,158 @@ async function xrpc(method, nsid, { c, query, body } = {}) {
 }
 
 async function login(c) {
-  if (!c.identifier || !c.password) throw new Error("Missing credentials: set BLUESKY_IDENTIFIER and BLUESKY_APP_PASSWORD (an app password, not your main one).");
+  if (c.jwt) {
+    const session = await xrpc("GET", "com.atproto.server.getSession", { c });
+    c.did = session.did || c.did;
+    c.handle = session.handle || c.handle;
+    return c;
+  }
+  if (!c.identifier || !c.password) throw new Error("Missing credentials: login to bsky.app in Chrome/Brave/Edge, or set BLUESKY_IDENTIFIER and BLUESKY_APP_PASSWORD (an app password, not your main one).");
   const r = await xrpc("POST", "com.atproto.server.createSession", { body: { identifier: c.identifier, password: c.password } });
-  c.jwt = r.accessJwt; c.did = r.did; c.handle = r.handle;
+  c.jwt = r.accessJwt; c.did = r.did; c.handle = r.handle; c.authSource = "app password";
+  return c;
+}
+
+function expandHome(input) {
+  if (!input) return input;
+  return input.startsWith("~/") ? path.join(os.homedir(), input.slice(2)) : input;
+}
+
+function existingLevelDbDirs(profileFlag) {
+  const home = os.homedir();
+  const candidates = [];
+  if (profileFlag) candidates.push(expandHome(profileFlag));
+  candidates.push(
+    path.join(home, "Library/Application Support/Google/Chrome"),
+    path.join(home, "Library/Application Support/BraveSoftware/Brave-Browser"),
+    path.join(home, "Library/Application Support/Microsoft Edge"),
+  );
+
+  const dirs = [];
+  for (const candidate of candidates) {
+    if (!candidate || !fs.existsSync(candidate)) continue;
+    const stat = fs.statSync(candidate);
+    if (!stat.isDirectory()) continue;
+    if (candidate.endsWith(path.join("Local Storage", "leveldb"))) {
+      dirs.push(candidate);
+      continue;
+    }
+    const direct = path.join(candidate, "Local Storage", "leveldb");
+    if (fs.existsSync(direct)) {
+      dirs.push(direct);
+      continue;
+    }
+    for (const entry of fs.readdirSync(candidate, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const leveldb = path.join(candidate, entry.name, "Local Storage", "leveldb");
+      if (fs.existsSync(leveldb)) dirs.push(leveldb);
+    }
+  }
+  return [...new Set(dirs)];
+}
+
+function maybeParseJson(value) {
+  if (typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function walkSessions(value, out = []) {
+  if (!value) return out;
+  if (typeof value === "string") {
+    const parsed = value.includes("Jwt") || value.includes("did:") ? maybeParseJson(value) : null;
+    if (parsed) walkSessions(parsed, out);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) walkSessions(item, out);
+    return out;
+  }
+  if (typeof value !== "object") return out;
+  const accessJwt = typeof value.accessJwt === "string" ? value.accessJwt : "";
+  if (accessJwt) {
+    out.push({
+      jwt: accessJwt,
+      did: typeof value.did === "string" ? value.did : "",
+      handle: typeof value.handle === "string" ? value.handle : "",
+    });
+  }
+  for (const item of Object.values(value)) walkSessions(item, out);
+  return out;
+}
+
+function jsonObjectsNear(haystack, needle) {
+  const out = [];
+  let idx = haystack.indexOf(needle);
+  while (idx !== -1) {
+    const startLimit = Math.max(0, idx - 50_000);
+    const start = haystack.lastIndexOf("{", idx);
+    if (start >= startLimit) {
+      let depth = 0, inString = false, escape = false;
+      for (let i = start; i < Math.min(haystack.length, start + 250_000); i++) {
+        const ch = haystack[i];
+        if (escape) { escape = false; continue; }
+        if (ch === "\\") { escape = true; continue; }
+        if (ch === "\"") { inString = !inString; continue; }
+        if (inString) continue;
+        if (ch === "{") depth++;
+        if (ch === "}") {
+          depth--;
+          if (depth === 0) {
+            out.push(haystack.slice(start, i + 1));
+            break;
+          }
+        }
+      }
+    }
+    idx = haystack.indexOf(needle, idx + needle.length);
+  }
+  return out;
+}
+
+function browserSessions(flags) {
+  const sessions = [];
+  for (const dir of existingLevelDbDirs(flags["browser-profile"])) {
+    let files = [];
+    try {
+      files = fs.readdirSync(dir)
+        .filter((f) => /\.(ldb|log)$/i.test(f))
+        .map((f) => path.join(dir, f))
+        .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      let buf;
+      try { buf = fs.readFileSync(file); } catch { continue; }
+      for (const text of [buf.toString("utf8"), buf.toString("utf16le")]) {
+        if (!text.includes("accessJwt")) continue;
+        for (const raw of jsonObjectsNear(text, "accessJwt")) {
+          const parsed = maybeParseJson(raw);
+          if (!parsed) continue;
+          for (const session of walkSessions(parsed)) {
+            if (!session.jwt) continue;
+            sessions.push({ ...session, source: `browser ${dir.replace(os.homedir(), "~")}` });
+          }
+        }
+      }
+    }
+  }
+  return sessions;
+}
+
+async function resolveAuth(c, flags) {
+  if (c.jwt || c.identifier || c.password || flags["no-browser"]) return c;
+  const [session] = browserSessions(flags);
+  if (session) {
+    c.jwt = session.jwt;
+    c.did = session.did;
+    c.handle = session.handle;
+    c.authSource = session.source;
+  }
   return c;
 }
 
@@ -96,7 +255,7 @@ async function createRecord(c, rec) {
 }
 
 async function readBody(parsed, idx) {
-  if (parsed.flags.file) { const { readFile } = await import("node:fs/promises"); return (await readFile(parsed.flags.file, "utf8")).trim(); }
+  if (parsed.flags.file) return fs.readFileSync(parsed.flags.file, "utf8").trim();
   return (parsed._[idx] || "").trim();
 }
 
@@ -111,11 +270,11 @@ async function main() {
   const parsed = parseArgs(process.argv.slice(2));
   const cmd = parsed._[0];
   if (!cmd || cmd === "help" || parsed.flags.help) { console.log(HELP); process.exit(0); }
-  const c = cfg(parsed.flags);
+  const c = await resolveAuth(cfg(parsed.flags), parsed.flags);
   try {
     if (cmd === "whoami" || cmd === "check") {
       await login(c);
-      return done(parsed, { success: true, message: `logged in as @${c.handle}`, did: c.did });
+      return done(parsed, { success: true, message: `logged in as @${c.handle}`, did: c.did, source: c.authSource || "credentials" });
     }
     if (cmd === "post") {
       const text = await readBody(parsed, 1);

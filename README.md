@@ -4,7 +4,8 @@ Local Bluesky CLI for posting and replying from the command line — a sibling o
 [`slash-x`](https://github.com/edihasaj/slash-x) and
 [`slash-reddit`](https://github.com/edihasaj/slash-reddit).
 
-Dependency-free single file. Uses the AT Protocol with an app password.
+Dependency-free single file. Uses the AT Protocol. It tries your existing
+bsky.app browser session first, then falls back to an app password.
 
 ## Install
 ```bash
@@ -12,11 +13,20 @@ cd ~/Projects/slash-bluesky && npm link    # exposes `slash-bluesky` and `slb`
 ```
 
 ## Auth
-Create an app password at <https://bsky.app/settings/app-passwords>, then:
+Default auth scans Chrome, Brave, and Edge local browser storage for a bsky.app
+session. If no usable browser session is available, create an app password at
+<https://bsky.app/settings/app-passwords>, then:
 ```bash
 export BLUESKY_IDENTIFIER=you.bsky.social
 export BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 slash-bluesky check
+```
+
+Useful browser flags:
+```bash
+slash-bluesky check --browser-profile "Default"
+slash-bluesky check --browser-profile "~/Library/Application Support/Google/Chrome/Default"
+slash-bluesky check --no-browser
 ```
 
 ## Use
@@ -32,4 +42,5 @@ slash-bluesky reply at://did:plc:…/app.bsky.feed.post/3kabc --file note.md --j
 | `reply <post> [text]` | Reply to a post (URL or `at://` uri) |
 | `whoami` / `check` | Show / verify the logged-in account |
 
-Options: `--file <path>`, `--json`, `--identifier`, `--password`.
+Options: `--file <path>`, `--json`, `--browser-profile`, `--no-browser`,
+`--identifier`, `--password`.
