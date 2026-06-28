@@ -13,7 +13,7 @@ cd ~/Projects/slash-bluesky && npm link    # exposes `slash-bluesky` and `slb`
 ```
 
 ## Auth
-Default auth scans Chrome, Brave, and Edge local browser storage for a bsky.app
+Default auth scans Chrome, Brave, and Edge browser storage for a bsky.app
 session. If no usable browser session is available, create an app password at
 <https://bsky.app/settings/app-passwords>, then:
 ```bash

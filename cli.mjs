@@ -18,7 +18,7 @@ Usage:
   slash-bluesky check                    Verify credentials / login
 
 Auth (https://bsky.app/settings/app-passwords):
-  Browser session auto-detected from Chrome/Brave/Edge local storage when present.
+  Browser session auto-detected from Chrome/Brave/Edge storage when present.
   BLUESKY_IDENTIFIER=you.bsky.social   BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
   (or pass --identifier / --password)
 
@@ -88,34 +88,49 @@ function expandHome(input) {
   return input.startsWith("~/") ? path.join(os.homedir(), input.slice(2)) : input;
 }
 
-function existingLevelDbDirs(profileFlag) {
+function existingStorageDirs(profileFlag) {
   const home = os.homedir();
-  const candidates = [];
-  if (profileFlag) candidates.push(expandHome(profileFlag));
-  candidates.push(
+  const browserRoots = [
     path.join(home, "Library/Application Support/Google/Chrome"),
     path.join(home, "Library/Application Support/BraveSoftware/Brave-Browser"),
     path.join(home, "Library/Application Support/Microsoft Edge"),
-  );
+  ];
+  const candidates = [];
+  if (profileFlag) {
+    const expanded = expandHome(profileFlag);
+    candidates.push(expanded);
+    if (!expanded.includes("/")) {
+      for (const root of browserRoots) candidates.push(path.join(root, expanded));
+    }
+  }
+  candidates.push(...browserRoots);
 
   const dirs = [];
+  const addStorageDirs = (profileDir) => {
+    const localStorage = path.join(profileDir, "Local Storage", "leveldb");
+    if (fs.existsSync(localStorage)) dirs.push(localStorage);
+    const indexedDb = path.join(profileDir, "IndexedDB");
+    if (!fs.existsSync(indexedDb)) return;
+    for (const entry of fs.readdirSync(indexedDb, { withFileTypes: true })) {
+      if (entry.isDirectory() && entry.name.includes("bsky.app") && entry.name.endsWith(".leveldb")) {
+        dirs.push(path.join(indexedDb, entry.name));
+      }
+    }
+  };
+
   for (const candidate of candidates) {
     if (!candidate || !fs.existsSync(candidate)) continue;
     const stat = fs.statSync(candidate);
     if (!stat.isDirectory()) continue;
-    if (candidate.endsWith(path.join("Local Storage", "leveldb"))) {
+    if (candidate.endsWith(path.join("Local Storage", "leveldb"))
+      || candidate.endsWith(".indexeddb.leveldb")) {
       dirs.push(candidate);
       continue;
     }
-    const direct = path.join(candidate, "Local Storage", "leveldb");
-    if (fs.existsSync(direct)) {
-      dirs.push(direct);
-      continue;
-    }
+    addStorageDirs(candidate);
     for (const entry of fs.readdirSync(candidate, { withFileTypes: true })) {
       if (!entry.isDirectory()) continue;
-      const leveldb = path.join(candidate, entry.name, "Local Storage", "leveldb");
-      if (fs.existsSync(leveldb)) dirs.push(leveldb);
+      addStorageDirs(path.join(candidate, entry.name));
     }
   }
   return [...new Set(dirs)];
@@ -185,7 +200,7 @@ function jsonObjectsNear(haystack, needle) {
 
 function browserSessions(flags) {
   const sessions = [];
-  for (const dir of existingLevelDbDirs(flags["browser-profile"])) {
+  for (const dir of existingStorageDirs(flags["browser-profile"])) {
     let files = [];
     try {
       files = fs.readdirSync(dir)
